@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/go-rod/rod"
@@ -166,5 +171,119 @@ func extractStatsFromModal(modal *rod.Element) (calories, carbs, protein int, er
 }
 
 func addMealToNotion(meal *Meal) error {
-	return nil
+	url := "https://api.notion.com/v1/pages/"
+	method := "POST"
+	payload, err := preparePayload(meal)
+	if err != nil {
+		return err
+	}
+	secret := os.Getenv("NOTION_SECRET")
+	if secret == "" {
+		return fmt.Errorf("notion secret not set")
+	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	reader := bytes.NewReader(jsonPayload)
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Notion-Version", "2022-02-22")
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", secret))
+
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	bodyStr := string(body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode < 400 {
+		fmt.Println(bodyStr)
+		return nil
+	}
+	return fmt.Errorf(bodyStr)
+}
+
+func preparePayload(meal *Meal) (Payload, error) {
+	databaseId := os.Getenv("DATABASE_ID")
+	if databaseId == "" {
+		return Payload{}, fmt.Errorf("database id not set")
+	}
+	parent := Parent{DatabaseID: databaseId}
+	external := External{URL: meal.ImageUrl}
+	cover := Cover{Type: "external", External: external}
+	properties := Properties{
+		Name:     Name{Title: []Title{{Text: Text{Content: meal.Name}}}},
+		Carbs:    Carbs{Type: "number", Number: meal.Carbs},
+		Calories: Calories{Type: "number", Number: meal.Calories},
+		Protein:  Protein{Type: "number", Number: meal.Protein},
+		Ingredients: Ingredients{
+			Type:     "rich_text",
+			RichText: []RichText{{Text: Text{Content: meal.Ingredients}}},
+		},
+	}
+	payload := Payload{Parent: parent, Cover: cover, Properties: properties}
+	return payload, nil
+}
+
+type Payload struct {
+	Parent     Parent     `json:"parent"`
+	Cover      Cover      `json:"cover"`
+	Properties Properties `json:"properties"`
+}
+type Parent struct {
+	DatabaseID string `json:"database_id"`
+}
+type External struct {
+	URL string `json:"url"`
+}
+type Cover struct {
+	Type     string   `json:"type"`
+	External External `json:"external"`
+}
+type Text struct {
+	Content string `json:"content"`
+}
+type Title struct {
+	Text Text `json:"text"`
+}
+type Name struct {
+	Title []Title `json:"title"`
+}
+type Calories struct {
+	Type   string `json:"type"`
+	Number int    `json:"number"`
+}
+type Protein struct {
+	Type   string `json:"type"`
+	Number int    `json:"number"`
+}
+type Carbs struct {
+	Type   string `json:"type"`
+	Number int    `json:"number"`
+}
+type RichText struct {
+	Text Text `json:"text"`
+}
+type Ingredients struct {
+	Type     string     `json:"type"`
+	RichText []RichText `json:"rich_text"`
+}
+type Properties struct {
+	Name        Name        `json:"Name"`
+	Calories    Calories    `json:"Calories"`
+	Protein     Protein     `json:"Protein"`
+	Carbs       Carbs       `json:"Carbs"`
+	Ingredients Ingredients `json:"Ingredients"`
 }
