@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"strconv"
@@ -60,7 +61,7 @@ func main() {
 		}
 	}
 	for i := 0; i < len(meals); i++ {
-		err := addMealToNotion(&meals[i])
+		_, err := addMealToNotion(&meals[i])
 		if err != nil {
 			panic(err)
 		}
@@ -164,23 +165,71 @@ func extractStatsFromModal(modal *rod.Element) (calories, carbs, protein int, er
 		case "Carbs":
 			carbs = statParsed
 		default:
-			panic(1)
+			return 0, 0, 0, fmt.Errorf("unexpected title")
 		}
 	}
 	return calories, carbs, protein, nil
 }
 
-func addMealToNotion(meal *Meal) error {
-	url := "https://api.notion.com/v1/pages/"
-	method := "POST"
-	payload, err := preparePayload(meal)
+func addMealToNotion(meal *Meal) (bool, error) {
+	createPayload, err := prepareCreatePayload(meal)
 	if err != nil {
-		return err
+		return false, err
 	}
+	queryPayload := prepareQueryPaylaod(meal)
 	secret := os.Getenv("NOTION_SECRET")
 	if secret == "" {
-		return fmt.Errorf("notion secret not set")
+		return false, fmt.Errorf("notion secret not set")
 	}
+	exists, err := checkMealExistsOnNotion(secret, &queryPayload)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil
+	}
+	err = createMealOnNotion(secret, &createPayload)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func checkMealExistsOnNotion(secret string, payload *QueryPayload) (bool, error) {
+	url := "https://api.notion.com/v1/databases/75768c18989642edabf16508ee4233fa/query"
+	method := "POST"
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	reader := bytes.NewReader(jsonPayload)
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Notion-Version", "2022-02-22")
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", secret))
+
+	res, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return false, err
+	}
+	fmt.Println(body)
+	return false, nil
+}
+
+func createMealOnNotion(secret string, payload *CreatePayload) error {
+	url := "https://api.notion.com/v1/pages/"
+	method := "POST"
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -215,10 +264,17 @@ func addMealToNotion(meal *Meal) error {
 	return fmt.Errorf(bodyStr)
 }
 
-func preparePayload(meal *Meal) (Payload, error) {
+func prepareQueryPaylaod(meal *Meal) QueryPayload {
+	payload := QueryPayload{
+		Filter: Filter{And: []And{{Property: "Name", RichText: QueryRichText{Equals: meal.Name}}}},
+	}
+	return payload
+}
+
+func prepareCreatePayload(meal *Meal) (CreatePayload, error) {
 	databaseId := os.Getenv("DATABASE_ID")
 	if databaseId == "" {
-		return Payload{}, fmt.Errorf("database id not set")
+		return CreatePayload{}, fmt.Errorf("database id not set")
 	}
 	parent := Parent{DatabaseID: databaseId}
 	external := External{URL: meal.ImageUrl}
@@ -233,11 +289,11 @@ func preparePayload(meal *Meal) (Payload, error) {
 			RichText: []RichText{{Text: Text{Content: meal.Ingredients}}},
 		},
 	}
-	payload := Payload{Parent: parent, Cover: cover, Properties: properties}
+	payload := CreatePayload{Parent: parent, Cover: cover, Properties: properties}
 	return payload, nil
 }
 
-type Payload struct {
+type CreatePayload struct {
 	Parent     Parent     `json:"parent"`
 	Cover      Cover      `json:"cover"`
 	Properties Properties `json:"properties"`
@@ -286,4 +342,18 @@ type Properties struct {
 	Protein     Protein     `json:"Protein"`
 	Carbs       Carbs       `json:"Carbs"`
 	Ingredients Ingredients `json:"Ingredients"`
+}
+
+type QueryPayload struct {
+	Filter Filter `json:"filter"`
+}
+type QueryRichText struct {
+	Equals string `json:"equals"`
+}
+type And struct {
+	Property string        `json:"property"`
+	RichText QueryRichText `json:"rich_text"`
+}
+type Filter struct {
+	And []And `json:"and"`
 }
